@@ -1,5 +1,6 @@
 # EndStone ARC Inventory / 弧光背包管理器
 
+[![Codacy Grade](https://app.codacy.com/project/badge/Grade/4c63155069c84452b4854f597cd258a7)](https://app.codacy.com/gh/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![版本](https://img.shields.io/badge/版本-0.1.0-blue.svg)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
