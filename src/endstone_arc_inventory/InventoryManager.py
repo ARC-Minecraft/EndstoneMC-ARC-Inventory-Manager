@@ -99,29 +99,132 @@ class InventoryManager:
         """
         从 ItemStack 安全读取附魔信息（str->int）。
         不访问 ItemMeta.enchants（会触发 unhashable），改用 get_enchant_level(id) 逐个查询。
+        附魔书等物品可能 has_enchants=False 但仍能按 id 读到等级，故不提前因 has_enchants 返回空。
         """
-        if not item_stack or not getattr(item_stack, "item_meta", None):
-            return {}
-        meta = item_stack.item_meta
-        if not getattr(meta, "has_enchants", False):
-            return {}
         result: Dict[str, int] = {}
-        get_level = getattr(meta, "get_enchant_level", None)
-        if not callable(get_level):
-            return {}
+        if not item_stack:
+            return result
+        meta = getattr(item_stack, "item_meta", None)
+        get_level = getattr(meta, "get_enchant_level", None) if meta is not None else None
+        if callable(get_level):
+            try:
+                for enchant_id in _build_enchant_ids():
+                    try:
+                        level = get_level(enchant_id)
+                        if level and int(level) > 0:
+                            result[enchant_id] = int(level)
+                    except Exception:
+                        continue
+            except Exception as enc_e:
+                self._log(
+                    "warning",
+                    f"[ARCInventory] Get enchants (get_enchant_level) failed: {enc_e}\n{traceback.format_exc()}",
+                )
+        if not result:
+            result = self._get_enchants_from_nbt(item_stack)
+        return result
+
+    def _get_enchants_from_nbt(self, item_stack: Any) -> Dict[str, int]:
+        """从用户 NBT 的 ench 列表尽量解析附魔（Bedrock 附魔书主要靠此）。"""
+        result: Dict[str, int] = {}
         try:
-            for enchant_id in _build_enchant_ids():
+            nbt = getattr(item_stack, "nbt", None)
+            if nbt is None:
+                return result
+            ench = None
+            if hasattr(nbt, "get"):
                 try:
-                    level = get_level(enchant_id)
-                    if level and int(level) > 0:
-                        result[enchant_id] = int(level)
+                    ench = nbt.get("ench")
+                except Exception:
+                    ench = None
+            if ench is None:
+                try:
+                    ench = nbt["ench"]
+                except Exception:
+                    return result
+            if ench is None:
+                return result
+            # ListTag / list
+            try:
+                entries = list(ench)
+            except Exception:
+                return result
+            id_by_num = {
+                # Bedrock legacy numeric ids commonly seen on enchanted books
+                0: "minecraft:protection",
+                1: "minecraft:fire_protection",
+                2: "minecraft:feather_falling",
+                3: "minecraft:blast_protection",
+                4: "minecraft:projectile_protection",
+                5: "minecraft:thorns",
+                6: "minecraft:respiration",
+                7: "minecraft:depth_strider",
+                8: "minecraft:aqua_affinity",
+                9: "minecraft:sharpness",
+                10: "minecraft:smite",
+                11: "minecraft:bane_of_arthropods",
+                12: "minecraft:knockback",
+                13: "minecraft:fire_aspect",
+                14: "minecraft:looting",
+                15: "minecraft:efficiency",
+                16: "minecraft:silk_touch",
+                17: "minecraft:unbreaking",
+                18: "minecraft:fortune",
+                19: "minecraft:power",
+                20: "minecraft:punch",
+                21: "minecraft:flame",
+                22: "minecraft:infinity",
+                23: "minecraft:luck_of_the_sea",
+                24: "minecraft:lure",
+                25: "minecraft:frost_walker",
+                26: "minecraft:mending",
+                27: "minecraft:binding",
+                28: "minecraft:vanishing",
+                29: "minecraft:impaling",
+                30: "minecraft:riptide",
+                31: "minecraft:loyalty",
+                32: "minecraft:channeling",
+                33: "minecraft:multishot",
+                34: "minecraft:piercing",
+                35: "minecraft:quick_charge",
+                36: "minecraft:soul_speed",
+                37: "minecraft:swift_sneak",
+            }
+            for entry in entries:
+                try:
+                    eid_raw = None
+                    lvl_raw = None
+                    if hasattr(entry, "get"):
+                        eid_raw = entry.get("id")
+                        lvl_raw = entry.get("lvl")
+                    if eid_raw is None:
+                        try:
+                            eid_raw = entry["id"]
+                        except Exception:
+                            continue
+                    if lvl_raw is None:
+                        try:
+                            lvl_raw = entry["lvl"]
+                        except Exception:
+                            continue
+                    # IntTag / ShortTag 等可能包一层 .value
+                    if hasattr(eid_raw, "value"):
+                        eid_raw = eid_raw.value
+                    if hasattr(lvl_raw, "value"):
+                        lvl_raw = lvl_raw.value
+                    level = int(lvl_raw)
+                    if level <= 0:
+                        continue
+                    if isinstance(eid_raw, str):
+                        eid = _normalize_enchant_id(eid_raw)
+                    else:
+                        eid = id_by_num.get(int(eid_raw))
+                    if eid:
+                        result[eid] = level
                 except Exception:
                     continue
-        except Exception as enc_e:
-            self._log(
-                "warning",
-                f"[ARCInventory] Get enchants (get_enchant_level) failed: {enc_e}\n{traceback.format_exc()}",
-            )
+        except Exception:
+            return {}
         return result
 
     def _get_item_lore(self, item_stack: Any) -> List[str]:
@@ -310,21 +413,152 @@ class InventoryManager:
             return False
 
     def give_item(self, player: Any, item_info: Dict[str, Any]) -> bool:
-        """向玩家背包发放物品（类型、数量、data；附魔/Lore 若 API 支持则应用）。"""
+        """向玩家背包发放物品（类型、数量、data；附魔/Lore/NBT 若 API 支持则应用）。"""
         given = self.give_item_count(player, item_info)
         return given >= int(item_info.get("count", 0) or 0)
+
+    def _resolve_max_stack(self, item_stack: Any) -> int:
+        """读取物品真实最大堆叠数；镐等工具为 1，不可再硬编码 64。"""
+        max_stack = getattr(item_stack, "max_stack_size", None)
+        if max_stack is None:
+            item_type = getattr(item_stack, "type", None)
+            max_stack = getattr(item_type, "max_stack_size", None) if item_type else None
+        try:
+            max_stack = int(max_stack) if max_stack is not None else 64
+        except Exception:
+            max_stack = 64
+        return max(1, max_stack)
+
+    def _apply_item_meta_extras(self, item_stack: Any, item_info: Dict[str, Any]) -> bool:
+        """用 enchants/lore 写入 ItemMeta；附魔使用 force=True，确保附魔书等可写入。"""
+        enchants = item_info.get("enchants") or {}
+        lore = item_info.get("lore") or []
+        if not enchants and not lore:
+            return False
+        try:
+            meta = item_stack.item_meta
+            if meta is None:
+                return False
+            applied = False
+            if enchants:
+                for enchant_id, level in enchants.items():
+                    try:
+                        if hasattr(meta, "add_enchant"):
+                            ok = meta.add_enchant(str(enchant_id), int(level), True)
+                            applied = bool(ok) or applied
+                    except TypeError:
+                        # 旧 API 无 force 参数
+                        try:
+                            ok = meta.add_enchant(str(enchant_id), int(level))
+                            applied = bool(ok) or applied
+                        except Exception as e:
+                            self._log(
+                                "warning",
+                                f"[ARCInventory] Failed to apply enchant {enchant_id}: {e}",
+                            )
+                    except Exception as e:
+                        self._log(
+                            "warning",
+                            f"[ARCInventory] Failed to apply enchant {enchant_id}: {e}",
+                        )
+            if lore and hasattr(meta, "lore"):
+                try:
+                    meta.lore = list(lore)
+                    applied = True
+                except Exception as e:
+                    self._log("warning", f"[ARCInventory] Failed to apply lore: {e}")
+            if hasattr(item_stack, "set_item_meta"):
+                item_stack.set_item_meta(meta)
+            return applied
+        except Exception as e:
+            self._log("warning", f"[ARCInventory] Apply item meta: {e}")
+            return False
+
+    def _restore_item_nbt(self, item_stack: Any, nbt_b64: str) -> bool:
+        """还原用户 NBT；成功返回 True。"""
+        try:
+            from endstone.nbt import load
+
+            raw_nbt = base64.b64decode(nbt_b64)
+            tag, _name = load(raw_nbt, byte_order="little")
+            if tag is None or not hasattr(item_stack, "nbt"):
+                return False
+            item_stack.nbt = tag
+            # 校验：写回后应仍能序列化出非空 NBT
+            check = self._serialize_item_nbt(item_stack)
+            return bool(check)
+        except Exception as e:
+            self._log("warning", f"[ARCInventory] Restore item NBT failed: {e}")
+            return False
+
+    def _enchants_from_nbt_b64(self, nbt_b64: str) -> Dict[str, int]:
+        """从已序列化的 nbt_b64 解析 ench，供 NBT 直接写回失败时的 ItemMeta 回退。"""
+        if not nbt_b64:
+            return {}
+        try:
+            from endstone.inventory import ItemStack
+            from endstone.nbt import load
+
+            raw_nbt = base64.b64decode(nbt_b64)
+            tag, _name = load(raw_nbt, byte_order="little")
+            if tag is None:
+                return {}
+            probe = ItemStack(type="minecraft:enchanted_book", amount=1)
+            if not hasattr(probe, "nbt"):
+                return {}
+            probe.nbt = tag
+            return self._get_enchants_from_nbt(probe)
+        except Exception:
+            return {}
+
+    def _prepare_give_stack(
+        self, item_type_id: str, amount: int, item_data: int, item_info: Dict[str, Any]
+    ) -> Any:
+        """构造待发放的 ItemStack：遵守 max_stack，优先 NBT，失败则回退附魔/Lore。"""
+        from endstone.inventory import ItemStack
+
+        item_stack = ItemStack(type=item_type_id, amount=1, data=item_data)
+        max_stack = self._resolve_max_stack(item_stack)
+        give_amount = min(max(1, int(amount)), max_stack)
+        item_stack.amount = give_amount
+
+        nbt_b64 = item_info.get("nbt_b64")
+        nbt_ok = False
+        if nbt_b64:
+            nbt_ok = self._restore_item_nbt(item_stack, nbt_b64)
+            if not nbt_ok:
+                self._log(
+                    "warning",
+                    f"[ARCInventory] NBT restore failed for {item_type_id}; fallback to enchants/lore.",
+                )
+
+        if not nbt_ok:
+            fallback_info = dict(item_info)
+            enchants = dict(fallback_info.get("enchants") or {})
+            if not enchants and nbt_b64:
+                enchants = self._enchants_from_nbt_b64(nbt_b64)
+                if enchants:
+                    fallback_info["enchants"] = enchants
+            self._apply_item_meta_extras(item_stack, fallback_info)
+
+        # 防止构造/还原过程改变数量
+        if getattr(item_stack, "amount", give_amount) != give_amount:
+            try:
+                item_stack.amount = give_amount
+            except Exception:
+                pass
+        return item_stack
 
     def give_item_count(self, player: Any, item_info: Dict[str, Any]) -> int:
         """
         尝试向玩家背包发放物品，返回**实际成功发放的数量**（可能为部分）。
+        按物品 max_stack_size 分堆发放（镐等不可堆叠会逐个发放），避免一次 amount>max 导致数量丢失。
         注意：当背包不足时不会强行回滚已发放部分；调用方需要基于返回值决定扣款/回滚策略。
         """
         try:
-            from endstone.inventory import ItemStack
-
             inventory = player.inventory
             item_type_id = item_info["type"]
-            total_amount = item_info["count"]
+            total_amount = int(item_info["count"])
             item_data = item_info.get("data", 0)
             if total_amount <= 0:
                 self._log("warning", f"[ARCInventory] Invalid item amount: {total_amount}")
@@ -332,53 +566,12 @@ class InventoryManager:
             remaining_to_give = total_amount
             given_total = 0
             while remaining_to_give > 0:
-                current_amount = min(remaining_to_give, 64)
-                if current_amount <= 0:
-                    break
-                item_stack = ItemStack(
-                    type=item_type_id,
-                    amount=current_amount,
-                    data=item_data,
+                item_stack = self._prepare_give_stack(
+                    item_type_id, remaining_to_give, item_data, item_info
                 )
-                nbt_b64 = item_info.get("nbt_b64")
-                if nbt_b64:
-                    try:
-                        from endstone.nbt import load
-
-                        raw_nbt = base64.b64decode(nbt_b64)
-                        tag, _name = load(raw_nbt, byte_order="little")
-                        if tag is not None and hasattr(item_stack, "nbt"):
-                            item_stack.nbt = tag
-                    except Exception as e:
-                        self._log(
-                            "warning",
-                            f"[ARCInventory] Restore item NBT failed: {e}",
-                        )
-                elif item_info.get("enchants") or item_info.get("lore"):
-                    try:
-                        meta = item_stack.item_meta
-                        if meta and item_info.get("enchants"):
-                            for enchant_id, level in item_info["enchants"].items():
-                                try:
-                                    if hasattr(meta, "add_enchant"):
-                                        meta.add_enchant(str(enchant_id), int(level))
-                                except Exception as e:
-                                    self._log(
-                                        "warning",
-                                        f"[ARCInventory] Failed to apply enchant {enchant_id}: {e}",
-                                    )
-                        if meta and item_info.get("lore") and hasattr(meta, "lore"):
-                            try:
-                                meta.lore = list(item_info["lore"])
-                            except Exception as e:
-                                self._log(
-                                    "warning",
-                                    f"[ARCInventory] Failed to apply lore: {e}",
-                                )
-                        if meta and hasattr(item_stack, "set_item_meta"):
-                            item_stack.set_item_meta(meta)
-                    except Exception as e:
-                        self._log("warning", f"[ARCInventory] Apply item meta: {e}")
+                stack_amount = int(getattr(item_stack, "amount", 0) or 0)
+                if stack_amount <= 0:
+                    break
                 remaining_items = inventory.add_item(item_stack)
                 if remaining_items:
                     try:
@@ -394,11 +587,11 @@ class InventoryManager:
                                 else None
                             )
                         remaining_amount = (
-                            getattr(first_remaining, "amount", 0)
+                            int(getattr(first_remaining, "amount", 0) or 0)
                             if first_remaining is not None
                             else 0
                         )
-                        added_amount = item_stack.amount - remaining_amount
+                        added_amount = max(0, stack_amount - remaining_amount)
                         if added_amount > 0:
                             given_total += added_amount
                         remaining_to_give -= added_amount
@@ -416,8 +609,8 @@ class InventoryManager:
                         # 计算失败时，宁可保守：认为本次未成功添加，直接停止，避免错误累计
                         break
                 else:
-                    remaining_to_give -= item_stack.amount
-                    given_total += item_stack.amount
+                    remaining_to_give -= stack_amount
+                    given_total += stack_amount
             return int(given_total)
         except Exception as e:
             self._log(

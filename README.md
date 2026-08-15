@@ -1,7 +1,7 @@
 # EndStone ARC Inventory / 弧光背包管理器
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/4c63155069c84452b4854f597cd258a7)](https://app.codacy.com/gh/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![版本](https://img.shields.io/badge/版本-0.1.0-blue.svg)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager)
+[![版本](https://img.shields.io/badge/版本-0.1.1-blue.svg)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 弧光系列共享背包工具插件。统一处理玩家背包的读取、匹配、扣除与发放（含附魔、Lore、Bedrock NBT），供按钮商店、成就等插件复用，避免各插件各写一套易踩坑的逻辑。
@@ -102,8 +102,15 @@ mgr = inv.api_get_inventory_manager()
 
 | 插件 | 关系 |
 |------|------|
-| 弧光按钮商店 | 交易扣物/发物应使用本插件 |
+| 弧光按钮商店 | **硬依赖**本插件进行交易扣物/发物（已无内嵌回退） |
 | 弧光核心 / 成就等 | 需要精确背包操作时可同样依赖本插件 |
+
+## 更新日志
+
+### v0.1.1
+- 修复发放时硬编码堆叠 64：改为读取 `ItemStack.max_stack_size`，镐等不可堆叠物品会逐个发放，避免删店/购买数量丢失
+- 修复附魔书等 NBT 还原失败后因 `if/elif` 无法回退到附魔/Lore 的问题；`add_enchant` 使用 `force=True`
+- 读取附魔时不再因 `has_enchants=False` 提前放弃；可从 NBT `ench` 列表补充解析
 
 ## 许可证
 
