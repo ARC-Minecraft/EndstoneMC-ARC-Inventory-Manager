@@ -18,6 +18,7 @@ class ARCInventoryPlugin(Plugin):
 
     api_version = "0.10"
     prefix = "ARCInventory"
+    load_before = ["arc_button_shop"]
 
     def __init__(self):
         super().__init__()
@@ -34,10 +35,13 @@ class ARCInventoryPlugin(Plugin):
             print(f"[{level.upper()}] {message}")
 
     def on_load(self) -> None:
+        if self.inventory_manager is None:
+            self.inventory_manager = InventoryManager(self)
         self._safe_log("info", "[ARCInventory] on_load")
 
     def on_enable(self) -> None:
-        self.inventory_manager = InventoryManager(self)
+        if self.inventory_manager is None:
+            self.inventory_manager = InventoryManager(self)
         self._safe_log("info", "[ARCInventory] 已启用，可供其它插件通过 api_* 操作玩家背包。")
 
     def on_disable(self) -> None:
