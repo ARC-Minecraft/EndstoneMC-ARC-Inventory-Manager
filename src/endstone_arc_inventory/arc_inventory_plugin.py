@@ -18,7 +18,7 @@ class ARCInventoryPlugin(Plugin):
 
     api_version = "0.10"
     prefix = "ARCInventory"
-    load_before = ["arc_button_shop"]
+    load_before = ["arc_button_shop", "arc_sign_shop"]
 
     def __init__(self):
         super().__init__()

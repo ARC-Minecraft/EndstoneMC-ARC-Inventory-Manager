@@ -1,7 +1,7 @@
 # EndStone ARC Inventory / 弧光背包管理器
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/4c63155069c84452b4854f597cd258a7)](https://app.codacy.com/gh/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![版本](https://img.shields.io/badge/版本-0.1.4-blue.svg)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager)
+[![版本](https://img.shields.io/badge/版本-0.1.5-blue.svg)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Inventory-Manager)
 [![EndStone](https://img.shields.io/badge/EndStone-0.10+-green.svg)](https://github.com/EndstoneMC/endstone)
 
 弧光系列共享背包工具插件。统一处理玩家背包的读取、匹配、扣除、发放、定点槽位、护甲与整包快照（含附魔、Lore、Bedrock NBT），供按钮商店、枪战等插件复用。
@@ -105,11 +105,14 @@ inv.api_clear_inventory(player, include_contents=True, include_armor=True)
 
 | 插件 | 关系 |
 |------|------|
-| 弧光按钮商店 | **硬依赖**本插件进行交易扣物/发物 |
+| 弧光按钮商店 / 木牌商店 | **硬依赖**本插件进行交易扣物/发物 |
 | 弧光枪战 | 热键布局、护甲、赛前快照走本插件 API |
 | 弧光核心 / 成就等 | 需要精确背包操作时可同样依赖本插件 |
 
 ## 更新日志
+
+### v0.1.5
+- `load_before` 增加 `arc_sign_shop`，与按钮商店一并保证启用顺序
 
 ### v0.1.4
 - 扩展现有发放/列出/扣除接口：`slot` / `armor_slot` / `reserved`+`prefer_end` / `include_armor` / `slot_min`/`slot_max` / `partial`
