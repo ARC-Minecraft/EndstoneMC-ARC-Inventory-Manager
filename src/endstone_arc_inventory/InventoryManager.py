@@ -7,10 +7,19 @@ Endstone ItemMeta.enchants 返回 dict[Enchantment, int]，键不可哈希会报
 """
 import base64
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Endstone 已知附魔 id 列表（minecraft:xxx），用于 get_enchant_level 逐个查询，避免访问 .enchants
 _ENCHANT_IDS: List[str] = []
+
+# 护甲 / 副手属性名（PlayerInventory）
+ARMOR_ATTRS: Tuple[str, ...] = (
+    "helmet",
+    "chestplate",
+    "leggings",
+    "boots",
+    "item_in_off_hand",
+)
 
 
 def _normalize_enchant_id(eid: str) -> str:
@@ -271,16 +280,94 @@ class InventoryManager:
                     return False
         return True
 
-    def get_inventory_items(self, player: Any) -> List[Dict[str, Any]]:
+    def _slot_in_range(
+        self,
+        slot_index: int,
+        slot_min: Optional[int],
+        slot_max: Optional[int],
+    ) -> bool:
+        if slot_min is not None and slot_index < int(slot_min):
+            return False
+        if slot_max is not None and slot_index > int(slot_max):
+            return False
+        return True
+
+    def _build_item_entry(
+        self,
+        player: Any,
+        item_stack: Any,
+        *,
+        slot_index: Optional[Union[int, str]] = None,
+        armor_slot: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not item_stack or not getattr(item_stack, "type", None):
+            return None
+        if int(getattr(item_stack, "amount", 0) or 0) <= 0:
+            return None
+        try:
+            item_type_id = item_stack.type.id
+            item_type_translation_key = item_stack.type.translation_key
+            display_name = item_type_id
+            if self._server and hasattr(self._server, "language"):
+                try:
+                    display_name = self._server.language.translate(
+                        item_type_translation_key,
+                        None,
+                        getattr(player, "locale", None),
+                    )
+                except Exception:
+                    pass
+            if item_stack.item_meta and getattr(
+                item_stack.item_meta, "has_display_name", False
+            ):
+                display_name = item_stack.item_meta.display_name
+            enchants = self._get_item_enchants(item_stack)
+            lore = self._get_item_lore(item_stack)
+            nbt_b64 = self._serialize_item_nbt(item_stack)
+            entry: Dict[str, Any] = {
+                "type": item_type_id,
+                "type_translation_key": item_type_translation_key,
+                "name": display_name,
+                "count": item_stack.amount,
+                "data": item_stack.data,
+                "enchants": enchants,
+                "lore": lore,
+            }
+            if slot_index is not None:
+                entry["slot_index"] = slot_index
+            if armor_slot:
+                entry["armor_slot"] = armor_slot
+            if nbt_b64:
+                entry["nbt_b64"] = nbt_b64
+            return entry
+        except Exception as item_e:
+            self._log(
+                "warning",
+                f"[ARCInventory] item entry build failed: {item_e}\n{traceback.format_exc()}",
+            )
+            return None
+
+    def get_inventory_items(
+        self,
+        player: Any,
+        *,
+        include_armor: bool = False,
+        slot_min: Optional[int] = None,
+        slot_max: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         获取玩家背包中所有有效物品的列表。
         每项为 dict：type, type_translation_key, name, count, data, enchants, lore, slot_index；
         若物品含完整用户 NBT（如附魔书），另含 nbt_b64（Base64 二进制 NBT）。
+        include_armor=True 时追加护甲/副手，带 armor_slot 字段。
+        slot_min/slot_max 仅过滤主背包槽位（含端点）。
         """
         items: List[Dict[str, Any]] = []
         try:
             inventory = player.inventory
             for slot_index in range(inventory.size):
+                if not self._slot_in_range(slot_index, slot_min, slot_max):
+                    continue
                 try:
                     item_stack = inventory.get_item(slot_index)
                 except Exception as slot_e:
@@ -289,47 +376,24 @@ class InventoryManager:
                         f"[ARCInventory] get_item(slot={slot_index}) failed: {slot_e}",
                     )
                     continue
-                if not item_stack or not item_stack.type or item_stack.amount <= 0:
-                    continue
-                try:
-                    item_type_id = item_stack.type.id
-                    item_type_translation_key = item_stack.type.translation_key
-                    display_name = item_type_id
-                    if self._server and hasattr(self._server, "language"):
-                        try:
-                            display_name = self._server.language.translate(
-                                item_type_translation_key,
-                                None,
-                                getattr(player, "locale", None),
-                            )
-                        except Exception:
-                            pass
-                    if item_stack.item_meta and getattr(
-                        item_stack.item_meta, "has_display_name", False
-                    ):
-                        display_name = item_stack.item_meta.display_name
-                    enchants = self._get_item_enchants(item_stack)
-                    lore = self._get_item_lore(item_stack)
-                    nbt_b64 = self._serialize_item_nbt(item_stack)
-                    entry: Dict[str, Any] = {
-                        "type": item_type_id,
-                        "type_translation_key": item_type_translation_key,
-                        "name": display_name,
-                        "count": item_stack.amount,
-                        "data": item_stack.data,
-                        "enchants": enchants,
-                        "lore": lore,
-                        "slot_index": slot_index,
-                    }
-                    if nbt_b64:
-                        entry["nbt_b64"] = nbt_b64
+                entry = self._build_item_entry(
+                    player, item_stack, slot_index=slot_index
+                )
+                if entry:
                     items.append(entry)
-                except Exception as item_e:
-                    self._log(
-                        "warning",
-                        f"[ARCInventory] Slot {slot_index} item build failed: "
-                        f"{item_e}\n{traceback.format_exc()}",
+            if include_armor:
+                for attr in ARMOR_ATTRS:
+                    if not hasattr(inventory, attr):
+                        continue
+                    try:
+                        stack = getattr(inventory, attr, None)
+                    except Exception:
+                        continue
+                    entry = self._build_item_entry(
+                        player, stack, slot_index=attr, armor_slot=attr
                     )
+                    if entry:
+                        items.append(entry)
             return items
         except Exception as e:
             self._log(
@@ -338,18 +402,53 @@ class InventoryManager:
             )
             return []
 
-    def has_item(self, player: Any, item_info: Dict[str, Any]) -> bool:
+    def has_item(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        slot_min: Optional[int] = None,
+        slot_max: Optional[int] = None,
+        include_armor: bool = False,
+    ) -> bool:
         """检查玩家背包是否拥有至少 item_info 要求数量、类型、data、附魔、Lore 一致的物品。"""
+        try:
+            required_count = int(item_info.get("count", 0) or 0)
+            if required_count <= 0:
+                return True
+            have = self.count_item(
+                player,
+                item_info,
+                slot_min=slot_min,
+                slot_max=slot_max,
+                include_armor=include_armor,
+            )
+            return have >= required_count
+        except Exception as e:
+            self._log("error", f"[ARCInventory] Player has item check error: {str(e)}")
+            return False
+
+    def count_item(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        slot_min: Optional[int] = None,
+        slot_max: Optional[int] = None,
+        include_armor: bool = False,
+    ) -> int:
+        """统计与 item_info 匹配的物品总数（忽略 item_info.count）。"""
         try:
             inventory = player.inventory
             required_type = item_info["type"]
-            required_count = item_info["count"]
             required_data = item_info.get("data", 0)
             required_enchants = item_info.get("enchants", {})
             required_lore = item_info.get("lore", [])
             required_nbt_b64 = item_info.get("nbt_b64")
             total_count = 0
             for slot_index in range(inventory.size):
+                if not self._slot_in_range(slot_index, slot_min, slot_max):
+                    continue
                 item_stack = inventory.get_item(slot_index)
                 if not self._item_stack_matches_info(
                     item_stack,
@@ -360,31 +459,71 @@ class InventoryManager:
                     required_nbt_b64,
                 ):
                     continue
-                total_count += item_stack.amount
-                if total_count >= required_count:
-                    return True
-            return False
+                total_count += int(getattr(item_stack, "amount", 0) or 0)
+            if include_armor:
+                for attr in ARMOR_ATTRS:
+                    if not hasattr(inventory, attr):
+                        continue
+                    item_stack = getattr(inventory, attr, None)
+                    if not self._item_stack_matches_info(
+                        item_stack,
+                        required_type,
+                        required_data,
+                        required_enchants,
+                        required_lore,
+                        required_nbt_b64,
+                    ):
+                        continue
+                    total_count += int(getattr(item_stack, "amount", 0) or 0)
+            return int(total_count)
         except Exception as e:
-            self._log("error", f"[ARCInventory] Player has item check error: {str(e)}")
-            return False
+            self._log("error", f"[ARCInventory] count_item error: {str(e)}")
+            return 0
 
-    def remove_item(self, player: Any, item_info: Dict[str, Any]) -> bool:
-        """从玩家背包移除与 item_info 匹配的物品（数量、类型、data、附魔、Lore）。"""
+    def remove_item(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        partial: bool = False,
+        slot_min: Optional[int] = None,
+        slot_max: Optional[int] = None,
+        include_armor: bool = False,
+    ) -> int:
+        """
+        从玩家背包移除与 item_info 匹配的物品。
+        默认不足则不改动并返回 0；partial=True 时尽可能扣除。
+        返回实际移除数量（布尔判断仍兼容：>0 为真）。
+        """
         try:
             inventory = player.inventory
             required_type = item_info["type"]
-            required_count = item_info["count"]
+            required_count = int(item_info.get("count", 0) or 0)
+            if required_count <= 0:
+                return 0
             required_data = item_info.get("data", 0)
             required_enchants = item_info.get("enchants", {})
             required_lore = item_info.get("lore", [])
             required_nbt_b64 = item_info.get("nbt_b64")
-            if not self.has_item(player, item_info):
-                return False
-            remaining_to_remove = required_count
+            have = self.count_item(
+                player,
+                item_info,
+                slot_min=slot_min,
+                slot_max=slot_max,
+                include_armor=include_armor,
+            )
+            if not partial and have < required_count:
+                return 0
+            remaining_to_remove = min(required_count, have)
+            if remaining_to_remove <= 0:
+                return 0
+            removed_total = 0
             slots_to_modify: List[tuple] = []
             for slot_index in range(inventory.size):
                 if remaining_to_remove <= 0:
                     break
+                if not self._slot_in_range(slot_index, slot_min, slot_max):
+                    continue
                 item_stack = inventory.get_item(slot_index)
                 if not self._item_stack_matches_info(
                     item_stack,
@@ -405,16 +544,58 @@ class InventoryManager:
                 else:
                     original_stack.amount = new_amount
                     inventory.set_item(slot_index, original_stack)
-            return True
+                removed_total += remove_count
+            if include_armor and remaining_to_remove > 0:
+                for attr in ARMOR_ATTRS:
+                    if remaining_to_remove <= 0:
+                        break
+                    if not hasattr(inventory, attr):
+                        continue
+                    item_stack = getattr(inventory, attr, None)
+                    if not self._item_stack_matches_info(
+                        item_stack,
+                        required_type,
+                        required_data,
+                        required_enchants,
+                        required_lore,
+                        required_nbt_b64,
+                    ):
+                        continue
+                    have_slot = int(getattr(item_stack, "amount", 0) or 0)
+                    take = min(have_slot, remaining_to_remove)
+                    if take >= have_slot:
+                        setattr(inventory, attr, None)
+                    else:
+                        item_stack.amount = have_slot - take
+                        setattr(inventory, attr, item_stack)
+                    remaining_to_remove -= take
+                    removed_total += take
+            return int(removed_total)
         except Exception as e:
             self._log(
                 "error", f"[ARCInventory] Remove item from player error: {str(e)}"
             )
-            return False
+            return 0
 
-    def give_item(self, player: Any, item_info: Dict[str, Any]) -> bool:
+    def give_item(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        slot: Optional[int] = None,
+        armor_slot: Optional[str] = None,
+        reserved: int = 0,
+        prefer_end: bool = False,
+    ) -> bool:
         """向玩家背包发放物品（类型、数量、data；附魔/Lore/NBT 若 API 支持则应用）。"""
-        given = self.give_item_count(player, item_info)
+        given = self.give_item_count(
+            player,
+            item_info,
+            slot=slot,
+            armor_slot=armor_slot,
+            reserved=reserved,
+            prefer_end=prefer_end,
+        )
         return given >= int(item_info.get("count", 0) or 0)
 
     def _resolve_max_stack(self, item_stack: Any) -> int:
@@ -549,25 +730,220 @@ class InventoryManager:
                 pass
         return item_stack
 
-    def give_item_count(self, player: Any, item_info: Dict[str, Any]) -> int:
-        """
-        尝试向玩家背包发放物品，返回**实际成功发放的数量**（可能为部分）。
-        按物品 max_stack_size 分堆发放（镐等不可堆叠会逐个发放），避免一次 amount>max 导致数量丢失。
-        注意：当背包不足时不会强行回滚已发放部分；调用方需要基于返回值决定扣款/回滚策略。
-        """
+    def _item_type_id(self, stack: Any) -> str:
+        item_type = getattr(stack, "type", None)
+        if item_type is None:
+            return ""
+        ident = getattr(item_type, "id", None)
+        if ident:
+            return str(ident)
+        return str(item_type)
+
+    def serialize_item(self, item_stack: Any) -> Optional[Dict[str, Any]]:
+        """将 ItemStack 序列化为可存档的 item_info（含可选 nbt_b64 / enchants / lore）。"""
+        if item_stack is None:
+            return None
+        try:
+            if int(getattr(item_stack, "amount", 0) or 0) <= 0:
+                return None
+            type_id = self._item_type_id(item_stack)
+            if not type_id or type_id == "minecraft:air":
+                return None
+            entry: Dict[str, Any] = {
+                "type": type_id,
+                "count": int(item_stack.amount),
+                "data": int(getattr(item_stack, "data", 0) or 0),
+            }
+            nbt_b64 = self._serialize_item_nbt(item_stack)
+            if nbt_b64:
+                entry["nbt_b64"] = nbt_b64
+            enchants = self._get_item_enchants(item_stack)
+            if enchants:
+                entry["enchants"] = enchants
+            lore = self._get_item_lore(item_stack)
+            if lore:
+                entry["lore"] = lore
+            return entry
+        except Exception:
+            return None
+
+    def make_item_stack(self, item_info: Dict[str, Any]) -> Any:
+        """由 item_info 构造 ItemStack（公开版 _prepare_give_stack）。"""
+        type_id = str(item_info.get("type") or "")
+        if not type_id or type_id == "minecraft:air":
+            return None
+        amount = max(1, int(item_info.get("count", 1) or 1))
+        data = int(item_info.get("data", 0) or 0)
+        return self._prepare_give_stack(type_id, amount, data, item_info)
+
+    def set_slot(
+        self,
+        player: Any,
+        slot: int,
+        item_info: Optional[Dict[str, Any]],
+    ) -> bool:
+        """写入主背包指定槽位；item_info 为 None 则清空该格。"""
         try:
             inventory = player.inventory
-            item_type_id = item_info["type"]
-            total_amount = int(item_info["count"])
-            item_data = item_info.get("data", 0)
+            slot_i = int(slot)
+            if slot_i < 0 or slot_i >= int(getattr(inventory, "size", 0) or 0):
+                return False
+            if not item_info:
+                inventory.set_item(slot_i, None)
+                return True
+            stack = self.make_item_stack(item_info)
+            inventory.set_item(slot_i, stack)
+            return True
+        except Exception as e:
+            self._log("error", f"[ARCInventory] set_slot error: {e}")
+            return False
+
+    def set_armor_slot(
+        self,
+        player: Any,
+        armor_slot: str,
+        item_info: Optional[Dict[str, Any]],
+    ) -> bool:
+        """写入护甲/副手槽；item_info 为 None 则清空。"""
+        attr = str(armor_slot or "").strip()
+        if attr not in ARMOR_ATTRS:
+            return False
+        try:
+            inventory = player.inventory
+            if not hasattr(inventory, attr):
+                return False
+            if not item_info:
+                setattr(inventory, attr, None)
+                return True
+            stack = self.make_item_stack(item_info)
+            setattr(inventory, attr, stack)
+            return True
+        except Exception as e:
+            self._log("error", f"[ARCInventory] set_armor_slot error: {e}")
+            return False
+
+    def _give_into_slot_range_end(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        reserved: int,
+    ) -> int:
+        """从背包末尾向前填充，避开前 reserved 格。"""
+        inventory = player.inventory
+        remaining = max(0, int(item_info.get("count", 0) or 0))
+        if remaining <= 0:
+            return 0
+        item_type_id = str(item_info["type"])
+        item_data = int(item_info.get("data", 0) or 0)
+        size = int(getattr(inventory, "size", 0) or 0)
+        start = max(int(reserved or 0), 0)
+        given = 0
+        for i in range(size - 1, start - 1, -1):
+            if remaining <= 0:
+                break
+            try:
+                existing = inventory.get_item(i)
+            except Exception:
+                continue
+            existing_id = self._item_type_id(existing) if existing else ""
+            existing_amt = int(getattr(existing, "amount", 0) or 0) if existing else 0
+            if not existing or not existing_id or existing_amt <= 0:
+                put_info = dict(item_info)
+                put_info["count"] = remaining
+                stack = self.make_item_stack(put_info)
+                if stack is None:
+                    break
+                put = int(getattr(stack, "amount", 0) or 0)
+                inventory.set_item(i, stack)
+                remaining -= put
+                given += put
+                continue
+            if existing_id != item_type_id:
+                continue
+            if int(getattr(existing, "data", 0) or 0) != item_data:
+                continue
+            max_stack = self._resolve_max_stack(existing)
+            space = max_stack - existing_amt
+            if space <= 0:
+                continue
+            put = min(space, remaining)
+            existing.amount = existing_amt + put
+            inventory.set_item(i, existing)
+            remaining -= put
+            given += put
+        return int(given)
+
+    def give_item_count(
+        self,
+        player: Any,
+        item_info: Dict[str, Any],
+        *,
+        slot: Optional[int] = None,
+        armor_slot: Optional[str] = None,
+        reserved: int = 0,
+        prefer_end: bool = False,
+    ) -> int:
+        """
+        尝试向玩家背包发放物品，返回**实际成功发放的数量**（可能为部分）。
+        - slot：写入主背包指定槽（覆盖该格；受 max_stack 限制）
+        - armor_slot：写入护甲/副手属性名
+        - prefer_end + reserved：从末尾向前填，避开前 reserved 格；仍放不下再 add_item
+        按物品 max_stack_size 分堆发放（镐等不可堆叠会逐个发放）。
+        """
+        try:
+            total_amount = int(item_info.get("count", 0) or 0)
             if total_amount <= 0:
                 self._log("warning", f"[ARCInventory] Invalid item amount: {total_amount}")
                 return 0
-            remaining_to_give = total_amount
+            armor = str(armor_slot or "").strip()
+            if armor:
+                if armor not in ARMOR_ATTRS:
+                    return 0
+                put_info = dict(item_info)
+                put_info["count"] = min(total_amount, 1) if total_amount > 0 else 0
+                # 护甲通常 1 件；仍按请求 count 写入 amount
+                put_info["count"] = total_amount
+                stack = self.make_item_stack(put_info)
+                if stack is None:
+                    return 0
+                inventory = player.inventory
+                if not hasattr(inventory, armor):
+                    return 0
+                setattr(inventory, armor, stack)
+                return int(getattr(stack, "amount", 0) or 0)
+
+            if slot is not None:
+                stack = self.make_item_stack(dict(item_info))
+                if stack is None:
+                    return 0
+                try:
+                    player.inventory.set_item(int(slot), stack)
+                except Exception:
+                    return 0
+                return int(getattr(stack, "amount", 0) or 0)
+
             given_total = 0
+            remaining_to_give = total_amount
+            if prefer_end:
+                end_info = dict(item_info)
+                end_info["count"] = remaining_to_give
+                placed = self._give_into_slot_range_end(
+                    player, end_info, reserved=int(reserved or 0)
+                )
+                given_total += placed
+                remaining_to_give -= placed
+                if remaining_to_give <= 0:
+                    return int(given_total)
+
+            inventory = player.inventory
+            item_type_id = item_info["type"]
+            item_data = item_info.get("data", 0)
             while remaining_to_give > 0:
+                chunk_info = dict(item_info)
+                chunk_info["count"] = remaining_to_give
                 item_stack = self._prepare_give_stack(
-                    item_type_id, remaining_to_give, item_data, item_info
+                    item_type_id, remaining_to_give, item_data, chunk_info
                 )
                 stack_amount = int(getattr(item_stack, "amount", 0) or 0)
                 if stack_amount <= 0:
@@ -606,7 +982,6 @@ class InventoryManager:
                             "warning",
                             f"[ARCInventory] Error calculating remaining: {e}",
                         )
-                        # 计算失败时，宁可保守：认为本次未成功添加，直接停止，避免错误累计
                         break
                 else:
                     remaining_to_give -= stack_amount
@@ -617,3 +992,135 @@ class InventoryManager:
                 "error", f"[ARCInventory] Give item to player error: {str(e)}"
             )
             return 0
+
+    def clear_inventory(
+        self,
+        player: Any,
+        *,
+        include_contents: bool = True,
+        include_armor: bool = True,
+        slot_min: Optional[int] = None,
+        slot_max: Optional[int] = None,
+    ) -> bool:
+        """清空主背包（可按槽范围）与/或护甲。"""
+        try:
+            inventory = player.inventory
+            if include_contents:
+                size = int(getattr(inventory, "size", 0) or 0)
+                if slot_min is None and slot_max is None and hasattr(inventory, "clear"):
+                    inventory.clear()
+                else:
+                    for i in range(size):
+                        if not self._slot_in_range(i, slot_min, slot_max):
+                            continue
+                        try:
+                            inventory.set_item(i, None)
+                        except Exception:
+                            continue
+            if include_armor:
+                for attr in ARMOR_ATTRS:
+                    if not hasattr(inventory, attr):
+                        continue
+                    try:
+                        setattr(inventory, attr, None)
+                    except Exception:
+                        continue
+            return True
+        except Exception as e:
+            self._log("error", f"[ARCInventory] clear_inventory error: {e}")
+            return False
+
+    def snapshot_inventory(
+        self,
+        player: Any,
+        *,
+        include_armor: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        全量快照：含空槽（None）。
+        返回 {"size": N, "slots": [...], "armor": {...}?}
+        """
+        out: Dict[str, Any] = {"size": 0, "slots": []}
+        try:
+            inventory = player.inventory
+            size = int(getattr(inventory, "size", 0) or 0)
+            slots: List[Optional[Dict[str, Any]]] = []
+            for i in range(size):
+                try:
+                    slots.append(self.serialize_item(inventory.get_item(i)))
+                except Exception:
+                    slots.append(None)
+            out["size"] = size
+            out["slots"] = slots
+            if include_armor:
+                armor: Dict[str, Any] = {}
+                for attr in ARMOR_ATTRS:
+                    if not hasattr(inventory, attr):
+                        continue
+                    try:
+                        armor[attr] = self.serialize_item(getattr(inventory, attr, None))
+                    except Exception:
+                        armor[attr] = None
+                out["armor"] = armor
+            return out
+        except Exception as e:
+            self._log("error", f"[ARCInventory] snapshot_inventory error: {e}")
+            return out
+
+    def restore_inventory(
+        self,
+        player: Any,
+        snapshot: Dict[str, Any],
+        *,
+        include_armor: bool = True,
+    ) -> bool:
+        """按快照还原主背包与护甲（先清空对应区域）。
+
+        支持两种格式：
+        - 扁平：{"size", "slots", "armor"?}
+        - 枪战兼容：{"inventory": {"slots":...}, "armor":...}
+        """
+        if not isinstance(snapshot, dict):
+            return False
+        try:
+            inventory = player.inventory
+            nested = snapshot.get("inventory")
+            if isinstance(nested, dict) and ("slots" in nested or "size" in nested):
+                slots = nested.get("slots")
+                armor = snapshot.get("armor") if "armor" in snapshot else nested.get("armor")
+            else:
+                slots = snapshot.get("slots")
+                armor = snapshot.get("armor")
+
+            if slots is not None:
+                size = int(getattr(inventory, "size", 0) or 0)
+                if hasattr(inventory, "clear"):
+                    inventory.clear()
+                for i, slot_data in enumerate(slots or []):
+                    if i >= size:
+                        break
+                    try:
+                        stack = self.make_item_stack(slot_data) if slot_data else None
+                        inventory.set_item(i, stack)
+                    except Exception:
+                        continue
+            if include_armor and isinstance(armor, dict):
+                for attr in ARMOR_ATTRS:
+                    if not hasattr(inventory, attr):
+                        continue
+                    try:
+                        data = armor.get(attr)
+                        setattr(
+                            inventory,
+                            attr,
+                            self.make_item_stack(data) if data else None,
+                        )
+                    except Exception:
+                        try:
+                            setattr(inventory, attr, None)
+                        except Exception:
+                            pass
+            return True
+        except Exception as e:
+            self._log("error", f"[ARCInventory] restore_inventory error: {e}")
+            return False
